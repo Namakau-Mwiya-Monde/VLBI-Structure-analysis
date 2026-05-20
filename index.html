@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="UTF-8">
+<title>VLBI Structure Correction Analysis</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
+<style>
+body{
+    font-family:system-ui;
+    margin:0;
+    background:#fff;
+}
+
+h1{
+    padding:10px;
+}
+
+.tabs,.src{
+    display:flex;
+    gap:6px;
+    padding:10px;
+    border-bottom:1px solid #ddd;
+    flex-wrap:wrap;
+}
+
+button{
+    padding:6px 10px;
+    border:1px solid #ccc;
+    background:#eee;
+    cursor:pointer;
+}
+
+button.active{
+    background:#378ADD;
+    color:#fff;
+}
+
+.page{
+    display:none;
+    padding:1rem;
+}
+
+.page.active{
+    display:block;
+}
+
+.card{
+    border:1px solid #ddd;
+    padding:1rem;
+    margin-bottom:1rem;
+}
+
+table{
+    border-collapse:collapse;
+    width:100%;
+    margin-top:10px;
+    font-size:13px;
+}
+
+th,td{
+    border:1px solid #ccc;
+    padding:6px;
+    text-align:center;
+}
+
+th{
+    background:#f0f0f0;
+}
+
+.highlight{
+    color:red;
+    font-weight:bold;
+}
+
+canvas{
+    max-width:100%;
+}
+</style>
+</head>
+
+<body>
+
+<h1>VLBI Structure Correction Analysis</h1>
+
+<div class="src"></div>
+
+<div class="tabs">
+<button class="active" onclick="show('ts',this)">Time Series</button>
+<button onclick="show('chi2',this)">Chi²</button>
+<button onclick="show('sky',this)">Sky Plot</button>
+</div>
+
+<div id="ts" class="page active">
+<div class="card">
+<h3>RA offsets</h3>
+<canvas id="ra"></canvas>
+</div>
+
+<div class="card">
+<h3>Dec offsets</h3>
+<canvas id="dec"></canvas>
+</div>
+</div>
+
+<div id="chi2" class="page">
+<div class="card">
+<div id="chi2content"></div>
+</div>
+</div>
+
+<div id="sky" class="page">
+
+<div class="card">
+<h3>Offset Transformations (RA reversed, relative to X-band a priori)</h3>
+<canvas id="skyPlot"></canvas>
+</div>
+
+<div class="card">
+<b>Symbol key:</b><br>
+
+● No correction &nbsp;&nbsp;
+▲ M1 &nbsp;&nbsp;
+■ M2 &nbsp;&nbsp;
+♦ M3 <br><br>
+
+— solid: NoCorr → M1 &nbsp;&nbsp;
+⋯ dotted: NoCorr → M2 &nbsp;&nbsp;
+– – dashed: NoCorr → M3 <br><br>
+
+<b>X</b>: X-band a priori
+</div>
+
+</div>
+
+<script>
+
+// =====================================================
+// LOAD
+// =====================================================
+let RAW={}, SRC=null;
+
+async function loadAll(){
+
+    let files = await fetch('file_list_combined.json').then(r=>r.json());
+
+    for(let f of files){
+
+        let name = f.split('_all_methods')[0];
+
+        let res = await fetch(f);
+
+        RAW[name] = parseCSV(await res.text());
+    }
+
+    createButtons();
+
+    SRC = Object.keys(RAW)[0];
+
+    render();
+}
+
+// =====================================================
+// SOURCE BUTTONS
+// =====================================================
+function createButtons(){
+
+    let div=document.querySelector('.src');
+
+    Object.keys(RAW).forEach((s,i)=>{
+
+        let b=document.createElement('button');
+
+        b.textContent=s;
+
+        if(i===0) b.classList.add('active');
+
+        b.onclick=()=>setSrc(s,b);
+
+        div.appendChild(b);
+    });
+}
+
+// =====================================================
+// CSV PARSER
+// =====================================================
+function parseCSV(t){
+
+    let r=t.trim().split("\n"),
+        h=r[0].split(",");
+
+    return r.slice(1).map(x=>{
+
+        let v=x.split(","),
+            o={};
+
+        h.forEach((k,i)=>o[k.trim()]=v[i]);
+
+        return{
+
+            s:o.Session,
+
+            // No correction
+            ra_nc:+o.RA_offset_mas_no_corr,
+            dec_nc:+o.Dec_offset_mas_no_corr,
+            e_ra:+o.RA_std_mas_no_corr,
+            e_dec:+o.Dec_std_mas_no_corr,
+
+            // M1
+            ra_M1:+o.RA_offset_mas_M1,
+            dec_M1:+o.Dec_offset_mas_M1,
+            e_ra_M1:+o.RA_std_mas_M1,
+            e_dec_M1:+o.Dec_std_mas_M1,
+
+            // M2
+            ra_M2:+o.RA_offset_mas_M2,
+            dec_M2:+o.Dec_offset_mas_M2,
+            e_ra_M2:+o.RA_std_mas_M2,
+            e_dec_M2:+o.Dec_std_mas_M2,
+
+            // M3
+            ra_M3:+o.RA_offset_mas_M3,
+            dec_M3:+o.Dec_offset_mas_M3,
+            e_ra_M3:+o.RA_std_mas_M3,
+            e_dec_M3:+o.Dec_std_mas_M3
+        };
+    });
+}
+
+// =====================================================
+// DATE PARSER
+// =====================================================
+function parseDate(s){
+
+    let y=2000+ +s.slice(0,2);
+
+    let M={
+        JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,
+        JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11
+    };
+
+    let d=new Date(y,M[s.slice(2,5)],+s.slice(5,7));
+
+    let s0=new Date(y,0,1),
+        s1=new Date(y+1,0,1);
+
+    return y+(d-s0)/(s1-s0);
+}
+
+// =====================================================
+// ERROR BAR PLUGIN
+// =====================================================
+const errorBarPlugin={
+
+id:'err',
+
+afterDatasetsDraw(c){
+
+    const ctx=c.ctx;
+
+    c.data.datasets.forEach((d,i)=>{
+
+        const meta=c.getDatasetMeta(i);
+
+        meta.data.forEach((p,j)=>{
+
+            let e=d.data[j].err;
+
+            if(!e) return;
+
+            let yTop=c.scales.y.getPixelForValue(d.data[j].y+e);
+            let yBot=c.scales.y.getPixelForValue(d.data[j].y-e);
+
+            ctx.beginPath();
+
+            ctx.moveTo(p.x,yTop);
+            ctx.lineTo(p.x,yBot);
+
+            ctx.strokeStyle=d.borderColor;
+
+            ctx.stroke();
+        });
+    });
+}
+};
+
+// =====================================================
+// TIME SERIES
+// =====================================================
+let raC,decC;
+
+function drawTS(){
+
+    let d=RAW[SRC]
+    .slice()
+    .sort((a,b)=>parseDate(a.s)-parseDate(b.s));
+
+    raC && raC.destroy();
+    decC && decC.destroy();
+
+    function ds(k,e,label,color){
+
+        return{
+            label,
+            data:d.map(x=>({
+                x:parseDate(x.s),
+                y:x[k],
+                err:x[e]
+            })),
+            borderColor:color,
+            backgroundColor:color,
+            pointRadius:4
+        };
+    }
+
+    // ================= RA =================
+    raC=new Chart(ra,{
+        type:'scatter',
+
+        data:{
+            datasets:[
+
+                ds("ra_nc","e_ra","NoCorr","#1E88E5"),
+                ds("ra_M1","e_ra_M1","M1","#D81B60"),
+                ds("ra_M2","e_ra_M2","M2","#43A047"),
+                ds("ra_M3","e_ra_M3","M3","#8E24AA")
+            ]
+        },
+
+        options:{
+            plugins:{
+                legend:{display:true}
+            },
+
+            scales:{
+                x:{
+                    min:2017,
+                    max:2018.25,
+                    title:{
+                        display:true,
+                        text:'Year'
+                    }
+                },
+
+                y:{
+                    min:-2,
+                    max:2,
+                    title:{
+                        display:true,
+                        text:'RA Offset (mas)'
+                    }
+                }
+            }
+        },
+
+        plugins:[errorBarPlugin]
+    });
+
+    // ================= DEC =================
+    decC=new Chart(dec,{
+        type:'scatter',
+
+        data:{
+            datasets:[
+
+                ds("dec_nc","e_dec","NoCorr","#1E88E5"),
+                ds("dec_M1","e_dec_M1","M1","#D81B60"),
+                ds("dec_M2","e_dec_M2","M2","#43A047"),
+                ds("dec_M3","e_dec_M3","M3","#8E24AA")
+            ]
+        },
+
+        options:{
+            plugins:{
+                legend:{display:true}
+            },
+
+            scales:{
+                x:{
+                    min:2017,
+                    max:2018.25,
+                    title:{
+                        display:true,
+                        text:'Year'
+                    }
+                },
+
+                y:{
+                    min:-2,
+                    max:2,
+                    title:{
+                        display:true,
+                        text:'Dec Offset (mas)'
+                    }
+                }
+            }
+        },
+
+        plugins:[errorBarPlugin]
+    });
+}
+
+// =====================================================
+// CHI2
+// =====================================================
+function wMean(v,e){
+
+    let w=v.map((x,i)=>1/(e[i]**2));
+
+    return v.reduce((a,x,i)=>a+x*w[i],0)
+        / w.reduce((a,b)=>a+b,0);
+}
+
+function buildTable(name,s,v,e){
+
+    let wm=wMean(v,e),
+        sum=0,
+        rows="";
+
+    v.forEach((x,i)=>{
+
+        let dev=x-wm;
+
+        let c=(dev**2)/(e[i]**2);
+
+        sum+=c;
+
+        let mark=c>5
+            ? "<span class='highlight'>◀</span>"
+            : "";
+
+        rows+=`
+        <tr>
+            <td>${s[i]}</td>
+            <td>${x.toFixed(3)}</td>
+            <td>${e[i].toFixed(3)}</td>
+            <td>${dev.toFixed(3)}</td>
+            <td>${c.toFixed(3)} ${mark}</td>
+        </tr>`;
+    });
+
+    let chi=sum/(v.length-1);
+
+    return `
+    <h4>${name}</h4>
+
+    <table>
+
+    <tr>
+        <th>Session</th>
+        <th>Δᵢ</th>
+        <th>σᵢ</th>
+        <th>Δᵢ−Δ̄</th>
+        <th>Contribution</th>
+    </tr>
+
+    ${rows}
+
+    <tr>
+        <td colspan="4"><b>χ²_red</b></td>
+        <td><b>${chi.toFixed(2)}</b></td>
+    </tr>
+
+    </table>`;
+}
+
+function drawChi2(){
+
+    let d=RAW[SRC],
+        s=d.map(x=>x.s);
+
+    let html="<h3>RA</h3>";
+
+    html+=buildTable(
+        "No Corr",
+        s,
+        d.map(x=>x.ra_nc),
+        d.map(x=>x.e_ra)
+    );
+
+    html+=buildTable(
+        "M1",
+        s,
+        d.map(x=>x.ra_M1),
+        d.map(x=>x.e_ra_M1)
+    );
+
+    html+=buildTable(
+        "M2",
+        s,
+        d.map(x=>x.ra_M2),
+        d.map(x=>x.e_ra_M2)
+    );
+
+    html+=buildTable(
+        "M3",
+        s,
+        d.map(x=>x.ra_M3),
+        d.map(x=>x.e_ra_M3)
+    );
+
+    html+="<h3>Dec</h3>";
+
+    html+=buildTable(
+        "No Corr",
+        s,
+        d.map(x=>x.dec_nc),
+        d.map(x=>x.e_dec)
+    );
+
+    html+=buildTable(
+        "M1",
+        s,
+        d.map(x=>x.dec_M1),
+        d.map(x=>x.e_dec_M1)
+    );
+
+    html+=buildTable(
+        "M2",
+        s,
+        d.map(x=>x.dec_M2),
+        d.map(x=>x.e_dec_M2)
+    );
+
+    html+=buildTable(
+        "M3",
+        s,
+        d.map(x=>x.dec_M3),
+        d.map(x=>x.e_dec_M3)
+    );
+
+    document.getElementById("chi2content").innerHTML=html;
+}
+
+// =====================================================
+// SKY PLOT
+// =====================================================
+let skyChart;
+
+function getColor(i){
+
+    const colors=[
+        "#D81B60",
+        "#1E88E5",
+        "#43A047",
+        "#FDD835",
+        "#8E24AA",
+        "#00ACC1",
+        "#6D4C41",
+        "#FB8C00",
+        "#546E7A"
+    ];
+
+    return colors[i % colors.length];
+}
+
+// =====================================================
+// SKY CONNECTIONS
+// =====================================================
+const skyPlugin={
+
+id:'links',
+
+afterDatasetsDraw(chart){
+
+    const ctx=chart.ctx;
+
+    RAW[SRC].forEach((d,i)=>{
+
+        let color=getColor(i);
+
+        let x_nc=chart.scales.x.getPixelForValue(d.ra_nc);
+        let y_nc=chart.scales.y.getPixelForValue(d.dec_nc);
+
+        let x_m1=chart.scales.x.getPixelForValue(d.ra_M1);
+        let y_m1=chart.scales.y.getPixelForValue(d.dec_M1);
+
+        let x_m2=chart.scales.x.getPixelForValue(d.ra_M2);
+        let y_m2=chart.scales.y.getPixelForValue(d.dec_M2);
+
+        let x_m3=chart.scales.x.getPixelForValue(d.ra_M3);
+        let y_m3=chart.scales.y.getPixelForValue(d.dec_M3);
+
+        // NoCorr -> M1
+        ctx.beginPath();
+        ctx.moveTo(x_nc,y_nc);
+        ctx.lineTo(x_m1,y_m1);
+
+        ctx.strokeStyle=color;
+        ctx.lineWidth=2;
+        ctx.setLineDash([]);
+
+        ctx.stroke();
+
+        // NoCorr -> M2
+        ctx.beginPath();
+        ctx.moveTo(x_nc,y_nc);
+        ctx.lineTo(x_m2,y_m2);
+
+        ctx.strokeStyle=color;
+        ctx.lineWidth=2;
+        ctx.setLineDash([5,5]);
+
+        ctx.stroke();
+
+        // NoCorr -> M3
+        ctx.beginPath();
+        ctx.moveTo(x_nc,y_nc);
+        ctx.lineTo(x_m3,y_m3);
+
+        ctx.strokeStyle=color;
+        ctx.lineWidth=2;
+        ctx.setLineDash([10,5]);
+
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+    });
+
+    // X-band marker
+    let x0=chart.scales.x.getPixelForValue(0);
+    let y0=chart.scales.y.getPixelForValue(0);
+
+    ctx.fillStyle="#000";
+    ctx.font="14px sans-serif";
+
+    ctx.fillText("X",x0+6,y0-6);
+}
+};
+
+// =====================================================
+// DRAW SKY
+// =====================================================
+function drawSky(){
+
+    let d=RAW[SRC];
+
+    skyChart && skyChart.destroy();
+
+    let datasets=[];
+
+    // Legend datasets
+    d.forEach((row,i)=>{
+
+        datasets.push({
+
+            label:row.s,
+
+            data:[{x:null,y:null}],
+
+            backgroundColor:getColor(i),
+
+            pointRadius:0
+        });
+    });
+
+    // Actual points
+    d.forEach((row,i)=>{
+
+        let c=getColor(i);
+
+        // NoCorr
+        datasets.push({
+            label:"",
+            data:[{x:row.ra_nc,y:row.dec_nc}],
+            pointStyle:'circle',
+            pointRadius:6,
+            backgroundColor:c
+        });
+
+        // M1
+        datasets.push({
+            label:"",
+            data:[{x:row.ra_M1,y:row.dec_M1}],
+            pointStyle:'triangle',
+            pointRadius:7,
+            backgroundColor:c
+        });
+
+        // M2
+        datasets.push({
+            label:"",
+            data:[{x:row.ra_M2,y:row.dec_M2}],
+            pointStyle:'rect',
+            pointRadius:6,
+            backgroundColor:c
+        });
+
+        // M3
+        datasets.push({
+            label:"",
+            data:[{x:row.ra_M3,y:row.dec_M3}],
+            pointStyle:'rectRot',
+            pointRadius:6,
+            backgroundColor:c
+        });
+    });
+
+    // X-band
+    datasets.push({
+
+        label:"X-band",
+
+        data:[{x:0,y:0}],
+
+        pointRadius:5,
+
+        backgroundColor:"#000"
+    });
+
+    skyChart=new Chart(skyPlot,{
+
+        type:'scatter',
+
+        data:{datasets},
+
+        options:{
+
+            plugins:{
+
+                legend:{
+
+                    display:true,
+
+                    labels:{
+                        filter:(item)=>item.text !== ""
+                    }
+                }
+            },
+
+            scales:{
+
+                x:{
+                    min:-6,
+                    max:6,
+                    reverse:true,
+
+                    title:{
+                        display:true,
+                        text:'RA Offset (mas)'
+                    }
+                },
+
+                y:{
+                    min:-2,
+                    max:2,
+
+                    title:{
+                        display:true,
+                        text:'Dec Offset (mas)'
+                    }
+                }
+            }
+        },
+
+        plugins:[skyPlugin]
+    });
+}
+
+// =====================================================
+// UI
+// =====================================================
+function setSrc(s,b){
+
+    SRC=s;
+
+    document
+    .querySelectorAll('.src button')
+    .forEach(x=>x.classList.remove('active'));
+
+    b.classList.add('active');
+
+    render();
+}
+
+function show(p,b){
+
+    document
+    .querySelectorAll('.page')
+    .forEach(x=>x.classList.remove('active'));
+
+    document
+    .getElementById(p)
+    .classList.add('active');
+
+    document
+    .querySelectorAll('.tabs button')
+    .forEach(x=>x.classList.remove('active'));
+
+    b.classList.add('active');
+}
+
+function render(){
+
+    drawTS();
+
+    drawChi2();
+
+    drawSky();
+}
+
+// =====================================================
+// START
+// =====================================================
+loadAll();
+
+</script>
+
+</body>
+</html>
